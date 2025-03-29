@@ -21,6 +21,7 @@ import com.calorie_tracker_backend.Service.CalorieService;
 public class CalorieController {
 
     private static final Logger logger = LoggerFactory.getLogger(CalorieController.class);
+    
     private final CalorieService calorieService;
 
     public CalorieController(CalorieService calorieService) {
@@ -34,21 +35,23 @@ public class CalorieController {
         ResponsePayload response = new ResponsePayload();
         try {
             // Step 1: Identify multiple food items from the image
-            List<String> foodNames = calorieService.identifyFoodFromImage(imageUrl);
+            // List<String> foodNames = calorieService.identifyFoodFromImage(imageUrl);
 
-            // Handle case where no food is detected
-            if (foodNames.isEmpty()) {
-                logger.warn("No food detected in the image.");
-                response.setNutritionData(nutritionData);
-                response.setResponseCode("ERROR");
-                response.setResponseMessage("No food detected in the image.");
-                return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
-            }
+            // // Handle case where no food is detected
+            // if (foodNames.isEmpty()) {
+            //     logger.warn("No food detected in the image.");
+            //     response.setNutritionData(nutritionData);
+            //     response.setResponseCode("ERROR");
+            //     response.setResponseMessage("No food detected in the image.");
+            //     return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
+            // }
 
-            logger.info("Detected food items: {}", foodNames);
+            // logger.info("Detected food items: {}", foodNames);
 
-            // Step 2: Fetch nutrition data for each food item and filter required values
-            nutritionData = calorieService.getFoodCalories(foodNames);
+            // // Step 2: Fetch nutrition data for each food item and filter required values
+            // nutritionData = calorieService.getFoodCalories(foodNames);
+
+            nutritionData = calorieService.analyzeImageAndGetNutrition(imageUrl);
             response.setNutritionData(nutritionData);
             response.setResponseCode("SUCCESS");
             response.setResponseMessage("Successfully fetched nutrientional value of the foods");

@@ -5,7 +5,12 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -14,144 +19,156 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 @Service
 public class CalorieService {
 
-    private static final String AI_API_URL = "https://openrouter.ai/api/v1/chat/completions";
-    private static final String API_KEY = "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"; // Replace
-                                                                                                                       // with
-                                                                                                                       // your
-                                                                                                                       // key
+    private static final Logger logger = LoggerFactory.getLogger(CalorieService.class);
 
-    private static final String NUTRITION_API_URL = "https://api.nal.usda.gov/fdc/v1/foods/search?query=";
-    private static final String NUTRITION_API_KEY = "EqstCc6dGEibpjWAnTpBszj5ymHZZFWWdywWIR24"; // Replace with USDA API
-                                                                                                // key
+    @Value("${ai.api.url}")
+    private String aiApiUrl;
 
-    private final RestTemplate restTemplate = new RestTemplate();
+    @Value("${ai.api.key}")
+    private String apiKey;
 
-    // 🔹 Step 1: Send Image to AI for Food Identification
-    public List<String> identifyFoodFromImage(String imageUrl) {
-        HttpHeaders headers = new HttpHeaders();
-        headers.set("Authorization", "Bearer " + API_KEY);
-        headers.setContentType(MediaType.APPLICATION_JSON);
+    private final RestTemplate restTemplate;
 
-        Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("model", "meta-llama/llama-3.2-11b-vision-instruct:free");
-
-        List<Map<String, Object>> messages = new ArrayList<>();
-        Map<String, Object> messageContent = new HashMap<>();
-        messageContent.put("role", "user");
-
-        List<Map<String, Object>> contentList = new ArrayList<>();
-        contentList.add(Map.of("type", "text", "text",
-                "Analyze this image and list all recognizable food items in a structured List format. ONLY return exact food names, do not describe the scene. Example output: {\"foods\": [\"Grilled Chicken\", \"Rice\", \"Salad\"]}."));
-        contentList.add(Map.of("type", "image_url", "image_url", Map.of("url", imageUrl)));
-
-        messageContent.put("content", contentList);
-        messages.add(messageContent);
-        requestBody.put("messages", messages);
-
-        HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBody, headers);
-        ResponseEntity<String> response = restTemplate.exchange(AI_API_URL, HttpMethod.POST, request, String.class);
-
-        return parseAIResponse(response.getBody());
+    public CalorieService(RestTemplate restTemplate) {
+        this.restTemplate = restTemplate;
     }
 
-    // 🔹 Step 2: Extract AI Response (Food Name)
-    private List<String> parseAIResponse(String responseBody) {
+    @SuppressWarnings("null")
+    public List<Map<String, Object>> analyzeImageAndGetNutrition(String imageUrl) throws Exception {
         try {
-            ObjectMapper objectMapper = new ObjectMapper();
-            JsonNode root = objectMapper.readTree(responseBody);
+            // **Single Prompt:** AI detects food and provides nutritional data
+            String prompt = "Analyze the given image URL and detect all food items. "
+                    + "For each detected food, return its nutrient values in JSON format. "
+                    + "Each food item should have: \"name\", \"calories\", \"carbs\", \"protein\", \"fat\", and \"fiber\". "
+                    + "Return ONLY a JSON object with a `foods` key containing an array. No extra text or explanation.\n"
+                    + "Ensure the output is structured as follows:\n"
+                    + "{ \"foods\": [ {\"name\": \"Apple\", \"calories\": 52, \"protein\": 0.3, \"fat\": 0.2, \"carbs\": 14, \"fiber\": 2.4} ] }";
 
-            // Extract JSON object that AI returns
-            String aiResponse = root.path("choices").get(0).path("message").path("content").asText();
+            // **Set up headers**
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("Authorization", "Bearer " + aiApiUrl);
+            headers.setContentType(MediaType.APPLICATION_JSON);
 
-            // Convert response to JSON and extract food names
-            JsonNode foodJson = objectMapper.readTree(aiResponse);
-            List<String> foodItems = new ArrayList<>();
-            for (JsonNode food : foodJson.path("foods")) {
-                foodItems.add(food.asText());
+            // **Construct request body**
+            Map<String, Object> requestBody = new HashMap<>();
+            requestBody.put("model", "meta-llama/llama-3.2-11b-vision-instruct:free");
+
+            List<Map<String, Object>> messages = new ArrayList<>();
+            Map<String, Object> messageContent = new HashMap<>();
+            messageContent.put("role", "user");
+
+            List<Map<String, Object>> contentList = new ArrayList<>();
+            contentList.add(Map.of("type", "text", "text", prompt));
+            contentList.add(Map.of("type", "image_url", "image_url", Map.of("url", imageUrl)));
+
+            messageContent.put("content", contentList);
+            messages.add(messageContent);
+            requestBody.put("messages", messages);
+
+            HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBody, headers);
+            ResponseEntity<String> response = restTemplate.exchange(aiApiUrl, HttpMethod.POST, request, String.class);
+
+            logger.info("AI response: {}", response.getBody());
+
+            // **Handle empty or invalid response**
+            if (response.getBody() == null || response.getBody().isBlank()) {
+                logger.error("Empty response from AI API.");
+                return new ArrayList<>();
             }
 
-            return foodItems;
+            return parseAIResponse2(response.getBody());
+
         } catch (Exception e) {
-            return List.of("Error identifying food");
+            logger.error("Error analyzing food image: {}", e.getMessage());
+            throw new RuntimeException("Failed to analyze image", e);
         }
     }
 
-    // 🔹 Step 3: Query Nutrition API for Calories
-    public List<Map<String, Object>> getFoodCalories(List<String> foodNames) {
-        List<Map<String, Object>> foodNutritionList = new ArrayList<>();
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> parseAIResponse2(String jsonResponse) throws JsonProcessingException {
+        ObjectMapper mapper = new ObjectMapper();
 
-        for (String foodName : foodNames) {
-            String url = NUTRITION_API_URL + foodName.trim() + "&api_key=" + NUTRITION_API_KEY;
-            ResponseEntity<String> response = restTemplate.getForEntity(url, String.class);
-            Map<String, Object> nutritionData = parseNutritionResponse(response.getBody());
-
-            foodNutritionList.add(nutritionData);
+        if (jsonResponse == null || jsonResponse.trim().isEmpty()) {
+            logger.error("Empty AI response.");
+            return new ArrayList<>();
         }
-        return foodNutritionList;
-    }
 
-    // 🔹 Step 4: Extract Calories & Nutrition Details
-    private Map<String, Object> parseNutritionResponse(String responseBody) {
+        // Log full AI response (for debugging)
+        logger.info("Raw AI response: {}", jsonResponse);
+
         try {
-            ObjectMapper objectMapper = new ObjectMapper();
-            JsonNode root = objectMapper.readTree(responseBody);
-    
-            // Check if "foods" array is present and has at least one entry
-            if (!root.has("foods") || root.get("foods").isEmpty()) {
-                return Map.of("error", "No food data found");
+            // Extract the content field from OpenRouter's response
+            JsonNode rootNode = mapper.readTree(jsonResponse);
+
+            if (!rootNode.has("choices") || !rootNode.get("choices").isArray() || rootNode.get("choices").isEmpty()) {
+                logger.error("Invalid AI response format: {}", jsonResponse);
+                return new ArrayList<>();
             }
-    
-            JsonNode food = root.path("foods").get(0);
-            Map<String, Object> nutrition = new HashMap<>();
-    
-            // Extract food name
-            String foodName = food.path("description").asText();
-            nutrition.put("name", foodName.isEmpty() ? "Unknown Food" : foodName);
-    
-            // Extract nutrients dynamically
-            JsonNode nutrients = food.path("foodNutrients");
-            if (nutrients.isArray()) {
-                for (JsonNode nutrient : nutrients) {
-                    String nutrientName = nutrient.path("nutrientName").asText();
-                    double value = nutrient.path("value").asDouble(0.0); // Default to 0.0 if missing
-    
-                    switch (nutrientName) {
-                        case "Energy":
-                            nutrition.put("calories", value);
-                            break;
-                        case "Protein":
-                            nutrition.put("protein", value);
-                            break;
-                        case "Total lipid (fat)":
-                            nutrition.put("fat", value);
-                            break;
-                        case "Carbohydrate, by difference":
-                            nutrition.put("carbs", value);
-                            break;
-                    }
+
+            // Extract message content (text response)
+            JsonNode messageNode = rootNode.get("choices").get(0).get("message");
+            if (messageNode == null || !messageNode.has("content")) {
+                logger.error("Missing 'content' field in AI response.");
+                return new ArrayList<>();
+            }
+
+            String content = messageNode.get("content").asText(); // Extract the response text
+
+            // Log content field for debugging
+            logger.info("Extracted AI content: {}", content);
+
+            // Find the first JSON block in the content
+            Matcher matcher = Pattern.compile("\\{.*\\}", Pattern.DOTALL).matcher(content);
+            if (matcher.find()) {
+                String jsonText = matcher.group(); // Extract only the JSON part
+
+                // Log extracted JSON
+                logger.info("Extracted JSON: {}", jsonText);
+
+                // Convert JSON to List<Map<String, Object>>
+                JsonNode contentNode = mapper.readTree(jsonText);
+                if (!contentNode.has("foods") || !contentNode.get("foods").isArray()) {
+                    logger.error("Invalid 'foods' format in extracted JSON: {}", jsonText);
+                    return new ArrayList<>();
                 }
+                String sanitizedJson = sanitizeJsonResponse(jsonText);
+                logger.info("Sanitized JSON: {}", sanitizedJson);
+
+                // Parse JSON into a map
+
+                Map<String, Object> responseMap = mapper.readValue(sanitizedJson,
+                        new TypeReference<Map<String, Object>>() {
+                        });
+
+                // Extract "foods" list safely
+                if (responseMap.containsKey("foods") && responseMap.get("foods") instanceof List) {
+                    return (List<Map<String, Object>>) responseMap.get("foods");
+                } else {
+                    logger.error("Invalid JSON format: 'foods' key missing or not an array");
+                    return new ArrayList<>();
+                }
+            } else {
+                logger.error("No valid JSON found in AI response.");
+                return new ArrayList<>();
             }
-    
-            // Ensure all fields are present, even if missing in API
-            nutrition.putIfAbsent("calories", 0.0);
-            nutrition.putIfAbsent("protein", 0.0);
-            nutrition.putIfAbsent("fat", 0.0);
-            nutrition.putIfAbsent("carbs", 0.0);
-    
-            return nutrition;
+
         } catch (Exception e) {
-            e.printStackTrace();
-            return Map.of("error", "Error parsing nutrition data");
+            logger.error("Error parsing AI response: {}", e.getMessage());
+            return new ArrayList<>();
         }
     }
-    
-    
-    
-    
+
+    private String sanitizeJsonResponse(String responseBody) {
+        // Convert values like 20g to "20g"
+        return responseBody.replaceAll("(?<=\"(calories|fat|protein|carbs|fiber)\":\\s*)(\\d+g)", "\"$2\"");
+    }
+
 }
